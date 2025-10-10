@@ -1,0 +1,36 @@
+---
+title: "DM-CEL Overview"
+format:
+  html:
+    toc: true
+    number-sections: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Welcome
+
+This is the **Desert–Montane Contemporary Ecology Lab** overview report. Customize
+this Quarto document to introduce your project, regions, and data sources.
+
+## Regions
+
+- Eureka Dunes (Death Valley NP)
+- Owens Valley
+- White Mountains
+- Tuolumne County
+
+## Example Figure
+
+```{r}
+source(here::here("scripts/example_analysis.R"))
+knitr::include_graphics("outputs/figures/ndvi_placeholder.png")
+```
+
+## Next Steps
+
+- Replace the placeholder analysis with real NDVI pulls (e.g., `MODISTools`).
+- Add spatial processing with `sf` and `terra`.
+- Publish to OSF using `scripts/osf_sync.R`.

@@ -1,0 +1,28 @@
+# R / Quarto
+.Rhistory
+.Rproj.user/
+.RData
+.Rproj.user
+.Ruserdata
+.Rproj.user/*
+.Rbuildignore
+.DS_Store
+
+# renv
+renv/library/
+renv/staging/
+renv/cache/
+renv/.lock
+renv.lock
+
+# Data & outputs
+data/raw/
+outputs/
+!outputs/.keep
+
+# Python
+__pycache__/
+.ipynb_checkpoints/
+
+# OS-specific
+Thumbs.db
