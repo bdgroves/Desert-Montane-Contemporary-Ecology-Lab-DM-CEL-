@@ -3,6 +3,10 @@
 
       - name: Generate processed data
         run: Rscript scripts/make_processed_sample2.R
+        
+       - name: Generate processed data (sample3)
+        run: Rscript scripts/make_processed_sample3.R
+
 
       # NEW: prove the OSF token works in CI and list components
       - name: DEBUG - OSF smoke test (auth + list nodes)
