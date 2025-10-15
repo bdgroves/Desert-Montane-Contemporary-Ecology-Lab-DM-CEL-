@@ -1,54 +1,19 @@
-name: build-and-sync-osf
-
-on:
-  push:
-    branches: [ "main" ]
-    paths:
-      - "reports/**"
-      - "outputs/**"
-      - "data/processed/**"
-      - "scripts/**"
-      - ".github/workflows/build-and-sync-osf.yml"
-  workflow_dispatch:
-
-concurrency:
-  group: build-and-sync-osf-${{ github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Set up R
-        uses: r-lib/actions/setup-r@v2
-
-      - name: Set up Pandoc
-        uses: r-lib/actions/setup-pandoc@v2
-
-      - name: Install system deps (spatial)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libudunits2-dev libgdal-dev libgeos-dev libproj-dev
-
-      - name: Cache R packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/R
-          key: ${{ runner.os }}-r-pkgs-${{ hashFiles('scripts/setup_packages.R') }}
-
-      - name: Install R packages
-        run: Rscript scripts/setup_packages.R
-
       - name: Install Quarto
         uses: quarto-dev/quarto-actions/setup@v2
 
-      # NEW: make the processed data in CI so OSF has something to upload
       - name: Generate processed data
         run: Rscript scripts/make_processed_sample2.R
+
+      # NEW: prove the OSF token works in CI and list components
+      - name: DEBUG - OSF smoke test (auth + list nodes)
+        env:
+          OSF_TOKEN: ${{ secrets.OSF_TOKEN }}
+          OSF_PROJECT: ${{ secrets.OSF_PROJECT }}
+        run: |
+          Rscript -e "install.packages('osfr', repos='https://cran.rstudio.com')"
+          Rscript -e "library(osfr); osf_auth(token = Sys.getenv('OSF_TOKEN')); \
+                      proj <- osf_retrieve_node(Sys.getenv('OSF_PROJECT')); \
+                      print(osf_ls_nodes(proj))"
 
       - name: Render Quarto report(s)
         run: quarto render reports/quarto/dmcel_overview.qmd
@@ -64,6 +29,7 @@ jobs:
           echo "=== data/processed ==="
           ls -R data/processed || true
 
+      # NEW: fail fast if token looks wrong
       - name: DEBUG - show non-sensitive OSF config
         run: |
           echo "OSF_PROJECT=${{ secrets.OSF_PROJECT }}"
@@ -73,7 +39,10 @@ jobs:
           import os; t=os.getenv('OSF_TOKEN',''); print(len(t))
           PY
           )"
-          echo "TOKEN_LEN=${TOKEN_LEN}"
+          if [ "$TOKEN_LEN" -lt 30 ]; then
+            echo "::error ::OSF_TOKEN appears too short ($TOKEN_LEN chars). Check repo Secrets."
+            exit 1
+          fi
 
       - name: Upload rendered reports (artifact)
         uses: actions/upload-artifact@v4
@@ -85,7 +54,6 @@ jobs:
             outputs/maps/**
 
       - name: OSF Sync
-        # continue-on-error: true   # <- uncomment if you want builds to pass even if OSF hiccups
         env:
           OSF_TOKEN: ${{ secrets.OSF_TOKEN }}
           OSF_PROJECT: ${{ secrets.OSF_PROJECT }}
