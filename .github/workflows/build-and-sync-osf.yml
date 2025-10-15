@@ -46,6 +46,10 @@ jobs:
       - name: Install Quarto
         uses: quarto-dev/quarto-actions/setup@v2
 
+      # NEW: make the processed data in CI so OSF has something to upload
+      - name: Generate processed data
+        run: Rscript scripts/make_processed_sample2.R
+
       - name: Render Quarto report(s)
         run: quarto render reports/quarto/dmcel_overview.qmd
 
@@ -81,8 +85,7 @@ jobs:
             outputs/maps/**
 
       - name: OSF Sync
-        # uncomment to keep builds green if OSF hiccups:
-        # continue-on-error: true
+        # continue-on-error: true   # <- uncomment if you want builds to pass even if OSF hiccups
         env:
           OSF_TOKEN: ${{ secrets.OSF_TOKEN }}
           OSF_PROJECT: ${{ secrets.OSF_PROJECT }}
