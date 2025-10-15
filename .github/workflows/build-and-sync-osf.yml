@@ -3,25 +3,42 @@ name: build-and-sync-osf
 on:
   push:
     branches: [ "main" ]
+    paths:
+      - "reports/**"
+      - "outputs/**"
+      - "data/processed/**"
+      - "scripts/**"
+      - ".github/workflows/build-and-sync-osf.yml"
   workflow_dispatch:
+
+concurrency:
+  group: build-and-sync-osf-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Setup R
+      - name: Set up R
         uses: r-lib/actions/setup-r@v2
 
-      - name: Setup Pandoc (for Quarto compatibility)
+      - name: Set up Pandoc
         uses: r-lib/actions/setup-pandoc@v2
 
-      - name: Install system deps
+      - name: Install system deps (spatial)
         run: |
           sudo apt-get update
           sudo apt-get install -y libudunits2-dev libgdal-dev libgeos-dev libproj-dev
+
+      - name: Cache R packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/R
+          key: ${{ runner.os }}-r-pkgs-${{ hashFiles('scripts/setup_packages.R') }}
 
       - name: Install R packages
         run: Rscript scripts/setup_packages.R
@@ -29,10 +46,43 @@ jobs:
       - name: Install Quarto
         uses: quarto-dev/quarto-actions/setup@v2
 
-      - name: Render Quarto
+      - name: Render Quarto report(s)
         run: quarto render reports/quarto/dmcel_overview.qmd
 
+      - name: DEBUG - list candidate upload files
+        run: |
+          echo "=== reports (html/pdf/qmd/md) ==="
+          ls -R reports || true
+          echo "=== outputs/figures ==="
+          ls -R outputs/figures || true
+          echo "=== outputs/maps ==="
+          ls -R outputs/maps || true
+          echo "=== data/processed ==="
+          ls -R data/processed || true
+
+      - name: DEBUG - show non-sensitive OSF config
+        run: |
+          echo "OSF_PROJECT=${{ secrets.OSF_PROJECT }}"
+          echo "OSF_DATA_COMPONENT=${{ secrets.OSF_DATA_COMPONENT }}"
+          echo "OSF_REPORTS_COMPONENT=${{ secrets.OSF_REPORTS_COMPONENT }}"
+          echo "TOKEN_LEN=$(python - << 'PY'
+          import os; t=os.getenv('OSF_TOKEN',''); print(len(t))
+          PY
+          )"
+          echo "TOKEN_LEN=${TOKEN_LEN}"
+
+      - name: Upload rendered reports (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmcel-reports
+          path: |
+            reports/**/*.html
+            outputs/figures/**
+            outputs/maps/**
+
       - name: OSF Sync
+        # uncomment to keep builds green if OSF hiccups:
+        # continue-on-error: true
         env:
           OSF_TOKEN: ${{ secrets.OSF_TOKEN }}
           OSF_PROJECT: ${{ secrets.OSF_PROJECT }}
