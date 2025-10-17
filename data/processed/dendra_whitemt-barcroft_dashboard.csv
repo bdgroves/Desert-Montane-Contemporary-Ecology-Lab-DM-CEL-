@@ -1,0 +1,13 @@
+measurement,value,units,datastream_source,timestamp_utc
+Battery voltage,13.91,V,Battery Voltage Max,2025-10-17T20:10:00Z
+Air temperature,3.402,degC,Air Temp Avg,2025-10-17T20:10:00Z
+Relative humidity,23.74,%,Relative Humidity Avg,2025-10-17T20:10:00Z
+Barometric pressure,501.6223,hPa,Barometric Pressure Avg,2025-10-17T20:10:00Z
+Mean sea-level pressure,786.9409079106832,hPa,Calculated from barometric pressure,2025-10-17T20:10:00Z
+PAR,1536,µmol/m²,Photosynthetically Active Radiation Avg,2025-10-17T20:10:00Z
+Total solar,739,W/m²,Total Solar Radiation Avg,2025-10-17T20:10:00Z
+Wind speed,1.254,m/s,Wind Speed Avg,2025-10-17T20:10:00Z
+Wind direction,5.887,°,Wind Direction Avg,2025-10-17T20:10:00Z
+Today's rainfall,0,mm,Rainfall Cumulative (logger),2020-07-14T10:20:00Z
+Yesterday's rainfall,3104,mm,Rainfall Cumulative (logger),2020-07-14T10:20:00Z
+WY precipitation to date,0,mm,Rainfall Cumulative (logger),2020-07-14T10:20:00Z
