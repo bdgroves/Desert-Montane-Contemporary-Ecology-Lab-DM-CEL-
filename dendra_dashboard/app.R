@@ -1,14 +1,7 @@
 # app.R
-# Shiny Dashboard for Dendra Science Weather Stations
+# Dendra Science Weather Station Dashboard - Production Version
 
-# Install and load packages
-quiet_install <- function(pkgs){
-  need <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
-  if (length(need)) install.packages(need, repos = "https://cloud.r-project.org")
-}
-quiet_install(c("shiny", "shinydashboard", "httr", "jsonlite", "dplyr", 
-                "plotly", "DT", "lubridate", "stringr"))
-
+# Load required packages (shinyapps.io will install automatically)
 library(shiny)
 library(shinydashboard)
 library(httr)
@@ -18,6 +11,78 @@ library(plotly)
 library(DT)
 library(lubridate)
 library(stringr)
+library(shinyWidgets)
+
+# ============================================================
+# UNIT CONVERSION FUNCTIONS
+# ============================================================
+
+convert_value <- function(value, datastream_name, to_imperial = TRUE) {
+  if (is.na(value) || is.null(value)) return(value)
+  
+  if (str_detect(datastream_name, regex("temp|Temp", ignore_case = FALSE))) {
+    if (to_imperial) return(value * 9/5 + 32)
+  }
+  
+  if (str_detect(datastream_name, regex("wind.*speed", ignore_case = TRUE))) {
+    if (to_imperial) return(value * 2.23694)
+  }
+  
+  if (str_detect(datastream_name, regex("pressure", ignore_case = TRUE))) {
+    if (to_imperial) return(value * 0.02953)
+  }
+  
+  if (str_detect(datastream_name, regex("rain|precip", ignore_case = TRUE))) {
+    if (to_imperial) return(value * 0.0393701)
+  }
+  
+  if (str_detect(datastream_name, regex("solar|radiation", ignore_case = TRUE))) {
+    if (to_imperial) return(value * 0.316998)
+  }
+  
+  return(value)
+}
+
+get_unit_label <- function(datastream_name, imperial = FALSE) {
+  if (str_detect(datastream_name, regex("temp|Temp", ignore_case = FALSE))) {
+    return(ifelse(imperial, "°F", "°C"))
+  }
+  
+  if (str_detect(datastream_name, regex("wind.*speed", ignore_case = TRUE))) {
+    return(ifelse(imperial, "mph", "m/s"))
+  }
+  
+  if (str_detect(datastream_name, regex("pressure", ignore_case = TRUE))) {
+    return(ifelse(imperial, "inHg", "hPa"))
+  }
+  
+  if (str_detect(datastream_name, regex("rain|precip", ignore_case = TRUE))) {
+    return(ifelse(imperial, "in", "mm"))
+  }
+  
+  if (str_detect(datastream_name, regex("solar.*radiation", ignore_case = TRUE)) &&
+      !str_detect(datastream_name, regex("PAR|Photosynthetically", ignore_case = TRUE))) {
+    return(ifelse(imperial, "BTU/(hr·ft²)", "W/m²"))
+  }
+  
+  if (str_detect(datastream_name, regex("humidity", ignore_case = TRUE))) {
+    return("%")
+  }
+  
+  if (str_detect(datastream_name, regex("PAR|Photosynthetically", ignore_case = TRUE))) {
+    return("µmol/m²/s")
+  }
+  
+  if (str_detect(datastream_name, regex("voltage|battery", ignore_case = TRUE))) {
+    return("V")
+  }
+  
+  if (str_detect(datastream_name, regex("wind.*direction", ignore_case = TRUE))) {
+    return("°")
+  }
+  
+  return("")
+}
 
 # ============================================================
 # API FUNCTIONS
@@ -32,7 +97,6 @@ get_json <- function(path, query=list()) {
   fromJSON(content(r, as = "text", encoding = "UTF-8"), simplifyVector = TRUE)
 }
 
-# Get all stations
 get_all_stations <- function() {
   stn <- get_json("/stations", query = list(`$limit` = 500))
   if ("data" %in% names(stn)) {
@@ -46,9 +110,7 @@ get_all_stations <- function() {
     arrange(name)
 }
 
-# Get current conditions for a station
 get_current_conditions <- function(station_id) {
-  # Get datastreams
   ds <- get_json("/datastreams", query = list(station_id = station_id, `$limit` = 200))
   if ("data" %in% names(ds)) {
     datastreams_df <- as_tibble(ds$data)
@@ -56,7 +118,6 @@ get_current_conditions <- function(station_id) {
     datastreams_df <- as_tibble(ds)
   }
   
-  # Get latest value from each datastream
   current_list <- list()
   
   for (i in 1:nrow(datastreams_df)) {
@@ -76,7 +137,7 @@ get_current_conditions <- function(station_id) {
         
         current_list[[i]] <- tibble(
           datastream = datastreams_df$name[i],
-          value = dp_df$v[1],
+          value_metric = dp_df$v[1],
           timestamp_utc = as.POSIXct(dp_df$t[1], format = "%Y-%m-%dT%H:%M:%S", tz = "UTC"),
           datastream_id = datastreams_df$`_id`[i]
         )
@@ -87,7 +148,6 @@ get_current_conditions <- function(station_id) {
   bind_rows(current_list)
 }
 
-# Get historical data for a datastream
 get_historical_data <- function(datastream_id, days = 7) {
   end_time <- as.numeric(Sys.time()) * 1000
   start_time <- end_time - (days * 24 * 60 * 60 * 1000)
@@ -108,10 +168,11 @@ get_historical_data <- function(datastream_id, days = 7) {
   
   if (nrow(datapoints) > 0) {
     datapoints %>%
-      mutate(timestamp = as.POSIXct(t, format = "%Y-%m-%dT%H:%M:%S", tz = "UTC")) %>%
-      select(timestamp, value = v)
+      mutate(timestamp = as.POSIXct(t, format = "%Y-%m-%dT%H:%M:%S", tz = "UTC"),
+             value_metric = v) %>%
+      select(timestamp, value_metric)
   } else {
-    tibble(timestamp = as.POSIXct(character()), value = numeric())
+    tibble(timestamp = as.POSIXct(character()), value_metric = numeric())
   }
 }
 
@@ -120,66 +181,305 @@ get_historical_data <- function(datastream_id, days = 7) {
 # ============================================================
 
 ui <- dashboardPage(
+  skin = "blue",
   
-  dashboardHeader(title = "Dendra Weather Stations"),
+  dashboardHeader(
+    title = "Dendra Weather",
+    titleWidth = 300,
+    tags$li(class = "dropdown",
+            style = "padding: 15px; margin-right: 10px;",
+            tags$div(
+              style = "display: inline-block;",
+              radioGroupButtons(
+                inputId = "unit_toggle",
+                label = NULL,
+                choices = c(
+                  `<i class='fa fa-flag-usa'></i> Imperial` = TRUE,
+                  `<i class='fa fa-globe'></i> Metric` = FALSE
+                ),
+                selected = TRUE,
+                justified = FALSE,
+                status = "primary",
+                size = "sm",
+                individual = TRUE,
+                checkIcon = list(
+                  yes = icon("check")
+                )
+              )
+            )
+    )
+  ),
   
   dashboardSidebar(
-    sidebarMenu(
-      menuItem("Dashboard", tabName = "dashboard", icon = icon("dashboard")),
-      menuItem("Historical Data", tabName = "historical", icon = icon("chart-line")),
-      menuItem("Data Export", tabName = "export", icon = icon("download")),
-      menuItem("About", tabName = "about", icon = icon("info-circle"))
-    ),
+    width = 300,
     
-    hr(),
-    
-    # Searchable selectize input
-    selectizeInput("station_select", 
-                   "Search & Select Station:",
-                   choices = NULL,
-                   options = list(
-                     placeholder = 'Type to search stations...',
-                     onInitialize = I('function() { this.setValue(""); }')
-                   ),
-                   width = "100%"),
-    
-    # Add helpful text
     tags$div(
-      style = "padding: 10px; font-size: 11px; color: #999;",
-      icon("info-circle"),
-      " Type station name to filter"
+      style = "padding: 15px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+               color: white; text-align: center; margin-bottom: 10px;",
+      h4(style = "margin: 5px 0;", icon("satellite-dish"), " Station Control"),
+      p(style = "margin: 5px 0; font-size: 11px; opacity: 0.9;", 
+        "Real-time weather data")
     ),
     
-    hr(),
+    sidebarMenu(
+      id = "tabs",
+      menuItem("Dashboard", tabName = "dashboard", 
+               icon = icon("tachometer-alt"),
+               badgeLabel = "live", badgeColor = "green"),
+      menuItem("Historical Data", tabName = "historical", 
+               icon = icon("chart-line")),
+      menuItem("Data Export", tabName = "export", 
+               icon = icon("download")),
+      menuItem("About", tabName = "about", 
+               icon = icon("info-circle"))
+    ),
     
-    actionButton("refresh_btn", "Refresh Data", 
-                 icon = icon("refresh"),
-                 class = "btn-primary",
-                 width = "100%")
+    hr(style = "border-color: rgba(255,255,255,0.1);"),
+    
+    tags$div(
+      style = "padding: 0 15px;",
+      
+      tags$label(
+        style = "color: #b8c7ce; font-weight: 600; font-size: 13px; margin-bottom: 8px; display: block;",
+        icon("search"), " SEARCH STATION"
+      ),
+      
+      selectizeInput("station_select", 
+                     label = NULL,
+                     choices = NULL,
+                     width = "100%"),
+      
+      uiOutput("selected_station_display"),
+      
+      tags$div(
+        style = "padding: 8px 10px; font-size: 11px; color: #8aa4af; 
+                 background-color: rgba(0,0,0,0.1); border-radius: 4px; margin-top: 8px;",
+        icon("lightbulb"), " Tip: Type 'Barcroft' or 'White Mountain'"
+      )
+    ),
+    
+    hr(style = "border-color: rgba(255,255,255,0.1);"),
+    
+    uiOutput("unit_display_info"),
+    
+    hr(style = "border-color: rgba(255,255,255,0.1);"),
+    
+    tags$div(
+      style = "padding: 0 15px;",
+      actionButton("refresh_btn", 
+                   label = span(icon("sync-alt"), " Refresh Data"),
+                   class = "btn-block",
+                   style = "background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); 
+                            color: white; border: none; font-weight: 600; 
+                            padding: 10px; border-radius: 5px;
+                            box-shadow: 0 4px 6px rgba(0,0,0,0.1);")
+    ),
+    
+    tags$div(
+      style = "position: absolute; bottom: 10px; width: 100%; text-align: center; 
+               padding: 10px; color: #8aa4af; font-size: 11px;",
+      p(style = "margin: 0;", icon("code"), " Built with R Shiny"),
+      p(style = "margin: 0;", "© 2024 Dendra Science")
+    )
   ),
   
   dashboardBody(
     tags$head(
+      tags$title("Dendra Weather Dashboard"),
+      
       tags$style(HTML("
-        .info-box { min-height: 100px; }
-        .info-box-icon { height: 100px; line-height: 100px; }
-        .info-box-content { padding-top: 10px; padding-bottom: 10px; }
-        .small-box { min-height: 120px; }
+        /* Main color theme */
+        .skin-blue .main-header .navbar {
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
         
-        /* Better styling for selectize */
+        .skin-blue .main-header .logo {
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          font-weight: 600;
+        }
+        
+        .skin-blue .main-header .logo:hover {
+          background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+        }
+        
+        /* Sidebar styling */
+        .skin-blue .main-sidebar {
+          background-color: #2c3e50;
+        }
+        
+        .skin-blue .sidebar-menu > li.active > a {
+          border-left-color: #43e97b;
+          background: rgba(67, 233, 123, 0.1);
+        }
+        
+        .skin-blue .sidebar-menu > li:hover > a {
+          background: rgba(255, 255, 255, 0.05);
+        }
+        
+        /* Value boxes */
+        .info-box { 
+          min-height: 100px; 
+          box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+          border-radius: 8px;
+        }
+        .info-box-icon { 
+          height: 100px; 
+          line-height: 100px; 
+          border-radius: 8px 0 0 8px;
+        }
+        .info-box-content { 
+          padding-top: 10px; 
+          padding-bottom: 10px; 
+        }
+        
+        /* Small boxes */
+        .small-box { 
+          min-height: 120px; 
+          border-radius: 8px;
+          box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        /* Box styling */
+        .box {
+          border-radius: 8px;
+          box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .box-header {
+          border-radius: 8px 8px 0 0;
+        }
+        
+        /* Selectize styling */
         .selectize-input {
           font-size: 14px;
-          padding: 8px 12px;
+          padding: 10px 12px;
+          border-radius: 5px;
+          border: 1px solid #34495e;
+          background-color: #34495e;
+          color: white;
+          min-height: 42px;
         }
+        
+        .selectize-input.focus {
+          border-color: #667eea;
+          box-shadow: 0 0 0 0.2rem rgba(102, 126, 234, 0.25);
+        }
+        
+        .selectize-input .item {
+          background-color: #667eea;
+          color: white;
+          padding: 4px 8px;
+          border-radius: 3px;
+          margin-right: 5px;
+        }
+        
+        .selectize-input input {
+          color: white !important;
+        }
+        
+        .selectize-input input::placeholder {
+          color: rgba(255,255,255,0.5);
+        }
+        
         .selectize-dropdown {
           font-size: 13px;
           max-height: 300px;
+          border-radius: 5px;
+          border-color: #34495e;
+          background-color: #fff;
         }
+        
         .selectize-dropdown-content {
           max-height: 280px;
         }
+        
         .selectize-dropdown-content .option {
           padding: 8px 12px;
+        }
+        
+        .selectize-dropdown .active {
+          background-color: #667eea;
+          color: white;
+        }
+        
+        /* Radio button styling */
+        .btn-group-toggle .btn {
+          padding: 8px 16px;
+          font-size: 13px;
+          font-weight: 600;
+        }
+        
+        .btn-primary {
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          border: none;
+        }
+        
+        .btn-primary:hover {
+          background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+        }
+        
+        .btn-primary.active {
+          background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+          box-shadow: 0 4px 8px rgba(67, 233, 123, 0.3);
+        }
+        
+        /* Download buttons */
+        .btn-success {
+          background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+          border: none;
+          font-weight: 600;
+          box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        .btn-success:hover {
+          background: linear-gradient(135deg, #38f9d7 0%, #43e97b 100%);
+          box-shadow: 0 6px 12px rgba(0,0,0,0.15);
+        }
+        
+        /* Content wrapper */
+        .content-wrapper {
+          background-color: #ecf0f5;
+        }
+        
+        /* Data table styling */
+        .dataTables_wrapper {
+          padding: 10px;
+        }
+        
+        /* Plotly styling */
+        .js-plotly-plot {
+          border-radius: 8px;
+        }
+        
+        /* Link styling */
+        .location-link, .wiki-link {
+          display: inline-block;
+          margin: 5px 10px 5px 0;
+          padding: 8px 12px;
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          color: white !important;
+          text-decoration: none;
+          border-radius: 5px;
+          font-size: 13px;
+          font-weight: 600;
+          transition: all 0.3s ease;
+          box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .location-link:hover, .wiki-link:hover {
+          background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+          box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+          transform: translateY(-2px);
+        }
+        
+        .selected-station-box {
+          background-color: rgba(102, 126, 234, 0.1);
+          border-left: 4px solid #667eea;
+          padding: 10px;
+          border-radius: 5px;
+          margin-top: 10px;
+          color: #b8c7ce;
+          font-size: 13px;
         }
       "))
     ),
@@ -189,11 +489,11 @@ ui <- dashboardPage(
       tabItem(tabName = "dashboard",
               fluidRow(
                 box(
-                  title = textOutput("station_title"),
+                  title = span(icon("map-marker-alt"), " ", textOutput("station_title", inline = TRUE)),
                   width = 12,
                   status = "primary",
                   solidHeader = TRUE,
-                  textOutput("station_info"),
+                  htmlOutput("station_info_with_links"),
                   br(),
                   textOutput("last_update")
                 )
@@ -208,14 +508,14 @@ ui <- dashboardPage(
               
               fluidRow(
                 box(
-                  title = "Temperature (Last 24 Hours)",
+                  title = span(icon("temperature-high"), " Temperature (Last 24 Hours)"),
                   width = 6,
                   status = "info",
                   solidHeader = TRUE,
                   plotlyOutput("temp_plot", height = 300)
                 ),
                 box(
-                  title = "Humidity (Last 24 Hours)",
+                  title = span(icon("tint"), " Humidity (Last 24 Hours)"),
                   width = 6,
                   status = "info",
                   solidHeader = TRUE,
@@ -225,7 +525,7 @@ ui <- dashboardPage(
               
               fluidRow(
                 box(
-                  title = "All Current Measurements",
+                  title = span(icon("table"), " All Current Measurements"),
                   width = 12,
                   status = "primary",
                   solidHeader = TRUE,
@@ -238,7 +538,7 @@ ui <- dashboardPage(
       tabItem(tabName = "historical",
               fluidRow(
                 box(
-                  title = "Historical Data Settings",
+                  title = span(icon("cog"), " Historical Data Settings"),
                   width = 12,
                   status = "primary",
                   solidHeader = TRUE,
@@ -265,9 +565,9 @@ ui <- dashboardPage(
                     column(4,
                            br(),
                            actionButton("load_hist_btn", 
-                                        "Load Data",
-                                        icon = icon("chart-line"),
-                                        class = "btn-success")
+                                        span(icon("chart-line"), " Load Data"),
+                                        class = "btn-success btn-block",
+                                        style = "margin-top: 0;")
                     )
                   )
                 )
@@ -275,7 +575,7 @@ ui <- dashboardPage(
               
               fluidRow(
                 box(
-                  title = "Time Series Plot",
+                  title = span(icon("chart-area"), " Time Series Plot"),
                   width = 12,
                   status = "info",
                   solidHeader = TRUE,
@@ -285,14 +585,14 @@ ui <- dashboardPage(
               
               fluidRow(
                 box(
-                  title = "Statistics",
+                  title = span(icon("calculator"), " Statistics"),
                   width = 6,
                   status = "warning",
                   solidHeader = TRUE,
                   tableOutput("hist_stats")
                 ),
                 box(
-                  title = "Data Table",
+                  title = span(icon("table"), " Data Table"),
                   width = 6,
                   status = "warning",
                   solidHeader = TRUE,
@@ -305,15 +605,26 @@ ui <- dashboardPage(
       tabItem(tabName = "export",
               fluidRow(
                 box(
-                  title = "Export Current Conditions",
+                  title = span(icon("file-download"), " Export Current Conditions"),
                   width = 6,
                   status = "success",
                   solidHeader = TRUE,
                   p("Download current conditions for the selected station."),
-                  downloadButton("download_current", "Download CSV", class = "btn-success")
+                  tags$div(
+                    style = "background-color: #d1ecf1; padding: 10px; border-radius: 5px; 
+                             border-left: 4px solid #17a2b8; margin-bottom: 15px;",
+                    icon("info-circle"), 
+                    strong(" Note: "), 
+                    "Data will be exported in ",
+                    tags$strong(textOutput("export_unit_system", inline = TRUE)),
+                    " units."
+                  ),
+                  downloadButton("download_current", 
+                                 span(icon("download"), " Download CSV"),
+                                 class = "btn-success btn-block")
                 ),
                 box(
-                  title = "Export Historical Data",
+                  title = span(icon("file-download"), " Export Historical Data"),
                   width = 6,
                   status = "success",
                   solidHeader = TRUE,
@@ -332,7 +643,18 @@ ui <- dashboardPage(
                                           "Last 30 Days" = 30,
                                           "Last 90 Days" = 90),
                               selected = 7),
-                  downloadButton("download_historical", "Download CSV", class = "btn-success")
+                  tags$div(
+                    style = "background-color: #d1ecf1; padding: 10px; border-radius: 5px; 
+                             border-left: 4px solid #17a2b8; margin-bottom: 15px;",
+                    icon("info-circle"),
+                    strong(" Note: "),
+                    "Data will be exported in ",
+                    tags$strong(textOutput("export_unit_system_hist", inline = TRUE)),
+                    " units."
+                  ),
+                  downloadButton("download_historical",
+                                 span(icon("download"), " Download CSV"),
+                                 class = "btn-success btn-block")
                 )
               )
       ),
@@ -341,40 +663,98 @@ ui <- dashboardPage(
       tabItem(tabName = "about",
               fluidRow(
                 box(
-                  title = "About Dendra Science",
+                  title = span(icon("info-circle"), " About Dendra Science Dashboard"),
                   width = 12,
                   status = "info",
                   solidHeader = TRUE,
-                  h4("Dendra Science Weather Station Dashboard"),
-                  p("This interactive dashboard provides real-time and historical data from weather stations 
-                    in the Dendra Science network."),
+                  
+                  tags$div(
+                    style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                             padding: 30px; border-radius: 8px; color: white; text-align: center;
+                             margin-bottom: 20px;",
+                    h2(style = "margin: 0; font-weight: 600;", 
+                       icon("cloud-sun"), " Dendra Weather Dashboard"),
+                    p(style = "margin: 10px 0 0 0; font-size: 16px; opacity: 0.9;",
+                      "Real-time weather data from research stations worldwide")
+                  ),
+                  
+                  h4(icon("star"), " Features:"),
+                  tags$div(
+                    style = "display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); 
+                             gap: 15px; margin-bottom: 20px;",
+                    
+                    tags$div(
+                      style = "padding: 15px; background-color: #f8f9fa; border-radius: 8px;
+                               border-left: 4px solid #667eea;",
+                      h5(icon("search"), " Smart Search"),
+                      p("Type-ahead station finder with instant filtering")
+                    ),
+                    tags$div(
+                      style = "padding: 15px; background-color: #f8f9fa; border-radius: 8px;
+                               border-left: 4px solid #43e97b;",
+                      h5(icon("ruler"), " Unit Conversion"),
+                      p("Toggle between Imperial and Metric units")
+                    ),
+                    tags$div(
+                      style = "padding: 15px; background-color: #f8f9fa; border-radius: 8px;
+                               border-left: 4px solid #f093fb;",
+                      h5(icon("map-marker-alt"), " Location Links"),
+                      p("View station locations on Google Maps")
+                    ),
+                    tags$div(
+                      style = "padding: 15px; background-color: #f8f9fa; border-radius: 8px;
+                               border-left: 4px solid #fad961;",
+                      h5(icon("download"), " Data Export"),
+                      p("Download CSV files in your preferred units")
+                    )
+                  ),
+                  
                   hr(),
-                  h4("Features:"),
+                  
+                  h4(icon("exchange-alt"), " Unit Conversions:"),
                   tags$ul(
-                    tags$li("🔍 Searchable station selector - type to find stations quickly"),
-                    tags$li("📊 View current conditions from any active station"),
-                    tags$li("📈 Interactive time series plots"),
-                    tags$li("📉 Historical data analysis with statistics"),
-                    tags$li("💾 Export data to CSV format"),
-                    tags$li("🔄 Real-time data refresh")
+                    style = "columns: 2; -webkit-columns: 2; -moz-columns: 2;",
+                    tags$li("Temperature: °C ⟷ °F"),
+                    tags$li("Wind Speed: m/s ⟷ mph"),
+                    tags$li("Pressure: hPa ⟷ inHg"),
+                    tags$li("Rainfall: mm ⟷ inches"),
+                    tags$li("Solar Radiation: W/m² ⟷ BTU/(hr·ft²)")
                   ),
+                  
                   hr(),
-                  h4("How to Use:"),
+                  
+                  h4(icon("question-circle"), " How to Use:"),
                   tags$ol(
-                    tags$li("Type in the station search box to find your station (e.g., 'Barcroft', 'White Mountain')"),
-                    tags$li("Select a station from the dropdown"),
-                    tags$li("View current conditions on the Dashboard tab"),
-                    tags$li("Explore historical data in the Historical Data tab"),
-                    tags$li("Export data from the Data Export tab")
+                    tags$li("Use the ", tags$strong("Imperial/Metric toggle"), " in the top-right"),
+                    tags$li("Search for your station in the ", tags$strong("sidebar")),
+                    tags$li("Click ", tags$strong("location links"), " to view on Google Maps"),
+                    tags$li("View ", tags$strong("live conditions"), " on the Dashboard"),
+                    tags$li("Explore ", tags$strong("historical trends"), " with custom date ranges"),
+                    tags$li("Export data in your ", tags$strong("preferred format"))
                   ),
+                  
                   hr(),
-                  h4("Data Source:"),
-                  p("Data is provided by ", 
-                    tags$a(href = "https://dendra.science", "Dendra Science", target = "_blank"),
-                    " via their public API."),
-                  p("API Endpoint: ", tags$code("https://api.dendra.science/v2")),
+                  
+                  tags$div(
+                    style = "background-color: #e7f3ff; padding: 20px; border-radius: 8px;
+                             border-left: 4px solid #2196F3;",
+                    h4(icon("database"), " Data Source"),
+                    p("Data is provided by ",
+                      tags$a(href = "https://dendra.science", 
+                             "Dendra Science", 
+                             target = "_blank",
+                             style = "color: #667eea; font-weight: 600;"),
+                      " via their public API."),
+                    p(tags$code("https://api.dendra.science/v2"))
+                  ),
+                  
                   hr(),
-                  p(tags$small("Built with R Shiny • Last updated: ", Sys.Date()))
+                  
+                  tags$div(
+                    style = "text-align: center; color: #6c757d;",
+                    p(icon("code"), " Built with R Shiny & shinydashboard"),
+                    p("© 2024 Dendra Science • Last updated: ", Sys.Date())
+                  )
                 )
               )
       )
@@ -388,21 +768,72 @@ ui <- dashboardPage(
 
 server <- function(input, output, session) {
   
-  # Reactive values
   rv <- reactiveValues(
     stations = NULL,
     current_data = NULL,
     selected_station = NULL,
     datastreams = NULL,
-    historical_data = NULL
+    historical_data = NULL,
+    historical_datastream_name = NULL
   )
   
-  # Load stations on startup
+  use_imperial <- reactive({
+    as.logical(input$unit_toggle)
+  })
+  
+  output$selected_station_display <- renderUI({
+    req(rv$selected_station)
+    
+    tags$div(
+      class = "selected-station-box",
+      icon("check-circle"), " Selected: ",
+      tags$strong(rv$selected_station$name)
+    )
+  })
+  
+  output$unit_display_info <- renderUI({
+    tags$div(
+      style = "padding: 12px 15px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+               border-radius: 8px; margin: 0 15px; color: white; box-shadow: 0 4px 6px rgba(0,0,0,0.1);",
+      tags$div(
+        style = "display: flex; align-items: center; justify-content: space-between;",
+        tags$div(
+          icon("ruler", style = "font-size: 20px; margin-right: 10px;"),
+          tags$span(style = "font-weight: 600; font-size: 13px;", "CURRENT UNITS")
+        ),
+        tags$div(
+          style = "background-color: rgba(255,255,255,0.2); padding: 5px 12px; 
+                   border-radius: 15px; font-size: 12px; font-weight: 600;",
+          if(use_imperial()) {
+            span(icon("flag-usa"), " Imperial")
+          } else {
+            span(icon("globe"), " Metric")
+          }
+        )
+      ),
+      tags$div(
+        style = "margin-top: 8px; font-size: 11px; opacity: 0.9;",
+        if(use_imperial()) {
+          "°F • mph • inHg • inches"
+        } else {
+          "°C • m/s • hPa • mm"
+        }
+      )
+    )
+  })
+  
+  output$export_unit_system <- renderText({
+    if(use_imperial()) "Imperial" else "Metric"
+  })
+  
+  output$export_unit_system_hist <- renderText({
+    if(use_imperial()) "Imperial" else "Metric"
+  })
+  
   observe({
     withProgress(message = 'Loading stations...', {
       rv$stations <- get_all_stations()
       
-      # Create searchable labels with name and full_name
       station_choices <- setNames(
         rv$stations$`_id`, 
         paste0(rv$stations$name, 
@@ -411,31 +842,26 @@ server <- function(input, output, session) {
                       ""))
       )
       
-      # Update with all choices at once (client-side search)
       updateSelectizeInput(
         session, 
         "station_select", 
         choices = station_choices,
-        selected = character(0)
+        server = FALSE
       )
     })
   })
   
-  # Load data when station selected or refresh clicked
-  observeEvent(c(input$station_select, input$refresh_btn), {
+  observeEvent(input$station_select, {
     req(input$station_select)
     
     withProgress(message = 'Loading station data...', {
       
-      # Get selected station info
       rv$selected_station <- rv$stations %>%
         filter(`_id` == input$station_select)
       
-      # Get current conditions
       incProgress(0.5, detail = "Fetching current conditions...")
       rv$current_data <- get_current_conditions(input$station_select)
       
-      # Update datastream choices with search
       if (nrow(rv$current_data) > 0) {
         datastream_choices <- setNames(
           rv$current_data$datastream_id, 
@@ -443,65 +869,108 @@ server <- function(input, output, session) {
         )
         
         updateSelectizeInput(session, "hist_datastream", 
-                             choices = datastream_choices,
-                             selected = character(0))
+                             choices = datastream_choices)
         updateSelectizeInput(session, "export_datastreams", 
-                             choices = datastream_choices,
-                             selected = character(0))
+                             choices = datastream_choices)
       }
     })
   }, ignoreNULL = TRUE)
   
-  # Station title
+  observeEvent(input$refresh_btn, {
+    req(input$station_select)
+    
+    withProgress(message = 'Refreshing data...', {
+      rv$current_data <- get_current_conditions(input$station_select)
+    })
+  })
+  
+  current_data_converted <- reactive({
+    req(rv$current_data)
+    
+    rv$current_data %>%
+      mutate(
+        value = mapply(convert_value, value_metric, datastream, 
+                       MoreArgs = list(to_imperial = use_imperial())),
+        units = sapply(datastream, get_unit_label, imperial = use_imperial())
+      )
+  })
+  
   output$station_title <- renderText({
     req(rv$selected_station)
     rv$selected_station$full_name
   })
   
-  # Station info
-  output$station_info <- renderText({
+  output$station_info_with_links <- renderUI({
     req(rv$selected_station)
     
-    info_parts <- c()
+    info_parts <- list()
     
     if ("geo" %in% names(rv$selected_station)) {
       geo <- rv$selected_station$geo[[1]]
       if (!is.null(geo$coordinates)) {
-        info_parts <- c(info_parts, 
-                        sprintf("📍 Location: %.5f°, %.5f°", 
-                                geo$coordinates[2], geo$coordinates[1]))
+        lat <- geo$coordinates[2]
+        lon <- geo$coordinates[1]
+        
+        google_maps_url <- sprintf("https://www.google.com/maps?q=%.5f,%.5f", lat, lon)
+        
+        info_parts[[length(info_parts) + 1]] <- tags$a(
+          href = google_maps_url,
+          target = "_blank",
+          class = "location-link",
+          icon("map-marked-alt"),
+          sprintf(" View on Map (%.5f°, %.5f°)", lat, lon)
+        )
       }
     }
     
+    if ("full_name" %in% names(rv$selected_station)) {
+      station_name <- rv$selected_station$full_name
+      search_name <- str_replace_all(station_name, "Weather Station|Station|Field|Research", "")
+      search_name <- str_trim(search_name)
+      wiki_url <- paste0("https://en.wikipedia.org/wiki/Special:Search?search=", 
+                         URLencode(search_name))
+      
+      info_parts[[length(info_parts) + 1]] <- tags$a(
+        href = wiki_url,
+        target = "_blank",
+        class = "wiki-link",
+        icon("wikipedia-w"),
+        " Search Wikipedia"
+      )
+    }
+    
     if ("time_zone" %in% names(rv$selected_station)) {
-      info_parts <- c(info_parts, 
-                      sprintf("🕐 Time Zone: %s", rv$selected_station$time_zone))
+      info_parts[[length(info_parts) + 1]] <- tags$span(
+        style = "display: block; margin-top: 10px;",
+        icon("clock"), " Time Zone: ", tags$strong(rv$selected_station$time_zone)
+      )
     }
     
     if ("slug" %in% names(rv$selected_station)) {
-      info_parts <- c(info_parts, 
-                      sprintf("🔗 Slug: %s", rv$selected_station$slug))
+      info_parts[[length(info_parts) + 1]] <- tags$span(
+        style = "display: block; margin-top: 5px;",
+        icon("tag"), " Slug: ", tags$code(rv$selected_station$slug)
+      )
     }
     
-    paste(info_parts, collapse = " | ")
+    tags$div(info_parts)
   })
   
-  # Last update time
   output$last_update <- renderText({
-    req(rv$current_data)
-    paste("🔄 Last updated:", format(max(rv$current_data$timestamp_utc), "%Y-%m-%d %H:%M UTC"))
+    req(current_data_converted())
+    paste("🔄 Last updated:", format(max(current_data_converted()$timestamp_utc), "%Y-%m-%d %H:%M UTC"))
   })
   
-  # Value boxes
   output$temp_box <- renderValueBox({
-    req(rv$current_data)
+    req(current_data_converted())
     
-    temp_data <- rv$current_data %>%
+    temp_data <- current_data_converted() %>%
       filter(str_detect(datastream, regex("Air Temp.*Avg", ignore_case = TRUE)))
     
     if (nrow(temp_data) > 0) {
+      unit_label <- get_unit_label("Air Temp Avg", use_imperial())
       valueBox(
-        sprintf("%.1f°C", temp_data$value[1]),
+        sprintf("%.1f%s", temp_data$value[1], unit_label),
         "Temperature",
         icon = icon("temperature-high"),
         color = "red"
@@ -512,9 +981,9 @@ server <- function(input, output, session) {
   })
   
   output$humidity_box <- renderValueBox({
-    req(rv$current_data)
+    req(current_data_converted())
     
-    hum_data <- rv$current_data %>%
+    hum_data <- current_data_converted() %>%
       filter(str_detect(datastream, regex("Humidity.*Avg", ignore_case = TRUE)))
     
     if (nrow(hum_data) > 0) {
@@ -530,14 +999,15 @@ server <- function(input, output, session) {
   })
   
   output$pressure_box <- renderValueBox({
-    req(rv$current_data)
+    req(current_data_converted())
     
-    press_data <- rv$current_data %>%
+    press_data <- current_data_converted() %>%
       filter(str_detect(datastream, regex("Barometric.*Avg", ignore_case = TRUE)))
     
     if (nrow(press_data) > 0) {
+      unit_label <- get_unit_label("Barometric Pressure Avg", use_imperial())
       valueBox(
-        sprintf("%.1f hPa", press_data$value[1]),
+        sprintf("%.2f %s", press_data$value[1], unit_label),
         "Pressure",
         icon = icon("gauge"),
         color = "green"
@@ -548,14 +1018,15 @@ server <- function(input, output, session) {
   })
   
   output$wind_box <- renderValueBox({
-    req(rv$current_data)
+    req(current_data_converted())
     
-    wind_data <- rv$current_data %>%
+    wind_data <- current_data_converted() %>%
       filter(str_detect(datastream, regex("Wind Speed.*Avg", ignore_case = TRUE)))
     
     if (nrow(wind_data) > 0) {
+      unit_label <- get_unit_label("Wind Speed Avg", use_imperial())
       valueBox(
-        sprintf("%.1f m/s", wind_data$value[1]),
+        sprintf("%.1f %s", wind_data$value[1], unit_label),
         "Wind Speed",
         icon = icon("wind"),
         color = "yellow"
@@ -565,7 +1036,6 @@ server <- function(input, output, session) {
     }
   })
   
-  # Temperature plot (24 hours)
   output$temp_plot <- renderPlotly({
     req(rv$current_data)
     
@@ -576,11 +1046,18 @@ server <- function(input, output, session) {
       hist_data <- get_historical_data(temp_ds$datastream_id[1], days = 1)
       
       if (nrow(hist_data) > 0) {
+        hist_data <- hist_data %>%
+          mutate(value = convert_value(value_metric, temp_ds$datastream[1], use_imperial()))
+        
+        unit_label <- get_unit_label("Air Temp Avg", use_imperial())
+        
         plot_ly(hist_data, x = ~timestamp, y = ~value, type = 'scatter', mode = 'lines',
-                line = list(color = 'rgb(255, 99, 71)')) %>%
+                line = list(color = 'rgb(255, 99, 71)', width = 3)) %>%
           layout(xaxis = list(title = "Time"),
-                 yaxis = list(title = "Temperature (°C)"),
-                 hovermode = 'x unified')
+                 yaxis = list(title = paste("Temperature (", unit_label, ")")),
+                 hovermode = 'x unified',
+                 plot_bgcolor = 'rgba(0,0,0,0)',
+                 paper_bgcolor = 'rgba(0,0,0,0)')
       } else {
         plot_ly() %>% layout(title = "No data available")
       }
@@ -589,7 +1066,6 @@ server <- function(input, output, session) {
     }
   })
   
-  # Humidity plot (24 hours)
   output$humidity_plot <- renderPlotly({
     req(rv$current_data)
     
@@ -600,11 +1076,16 @@ server <- function(input, output, session) {
       hist_data <- get_historical_data(hum_ds$datastream_id[1], days = 1)
       
       if (nrow(hist_data) > 0) {
+        hist_data <- hist_data %>%
+          mutate(value = value_metric)
+        
         plot_ly(hist_data, x = ~timestamp, y = ~value, type = 'scatter', mode = 'lines',
-                line = list(color = 'rgb(65, 105, 225)')) %>%
+                line = list(color = 'rgb(65, 105, 225)', width = 3)) %>%
           layout(xaxis = list(title = "Time"),
                  yaxis = list(title = "Humidity (%)"),
-                 hovermode = 'x unified')
+                 hovermode = 'x unified',
+                 plot_bgcolor = 'rgba(0,0,0,0)',
+                 paper_bgcolor = 'rgba(0,0,0,0)')
       } else {
         plot_ly() %>% layout(title = "No data available")
       }
@@ -613,95 +1094,129 @@ server <- function(input, output, session) {
     }
   })
   
-  # Current measurements table
   output$current_table <- renderDT({
-    req(rv$current_data)
+    req(current_data_converted())
     
-    rv$current_data %>%
-      mutate(timestamp_local = format(timestamp_utc, "%Y-%m-%d %H:%M UTC")) %>%
+    current_data_converted() %>%
+      mutate(timestamp_local = format(timestamp_utc, "%Y-%m-%d %H:%M UTC"),
+             value_display = sprintf("%.2f", value)) %>%
       select(Datastream = datastream, 
-             Value = value, 
+             Value = value_display,
+             Units = units,
              Timestamp = timestamp_local) %>%
       datatable(options = list(pageLength = 10, autoWidth = TRUE),
                 rownames = FALSE)
   })
   
-  # Load historical data
   observeEvent(input$load_hist_btn, {
     req(input$hist_datastream, input$hist_days)
     
     withProgress(message = 'Loading historical data...', {
       rv$historical_data <- get_historical_data(input$hist_datastream, 
                                                 as.numeric(input$hist_days))
+      
+      ds_match <- rv$current_data %>% filter(datastream_id == input$hist_datastream)
+      rv$historical_datastream_name <- if(nrow(ds_match) > 0) ds_match$datastream[1] else ""
     })
   })
   
-  # Historical plot
-  output$historical_plot <- renderPlotly({
-    req(rv$historical_data)
+  historical_data_converted <- reactive({
+    req(rv$historical_data, rv$historical_datastream_name)
     
-    if (nrow(rv$historical_data) > 0) {
-      plot_ly(rv$historical_data, x = ~timestamp, y = ~value, 
+    rv$historical_data %>%
+      mutate(
+        value = convert_value(value_metric, rv$historical_datastream_name, use_imperial())
+      )
+  })
+  
+  output$historical_plot <- renderPlotly({
+    req(historical_data_converted(), rv$historical_datastream_name)
+    
+    if (nrow(historical_data_converted()) > 0) {
+      unit_label <- get_unit_label(rv$historical_datastream_name, use_imperial())
+      
+      plot_ly(historical_data_converted(), x = ~timestamp, y = ~value, 
               type = 'scatter', mode = 'lines+markers',
-              line = list(color = 'rgb(75, 192, 192)'),
-              marker = list(size = 4)) %>%
+              line = list(color = 'rgb(102, 126, 234)', width = 2),
+              marker = list(size = 5, color = 'rgb(118, 75, 162)')) %>%
         layout(xaxis = list(title = "Time"),
-               yaxis = list(title = "Value"),
-               hovermode = 'x unified')
+               yaxis = list(title = paste("Value (", unit_label, ")")),
+               hovermode = 'x unified',
+               plot_bgcolor = 'rgba(0,0,0,0)',
+               paper_bgcolor = 'rgba(0,0,0,0)')
     } else {
       plot_ly() %>% layout(title = "No data available")
     }
   })
   
-  # Historical statistics
   output$hist_stats <- renderTable({
-    req(rv$historical_data)
+    req(historical_data_converted())
     
-    if (nrow(rv$historical_data) > 0) {
+    if (nrow(historical_data_converted()) > 0) {
+      unit_label <- get_unit_label(rv$historical_datastream_name, use_imperial())
+      
       data.frame(
         Statistic = c("Count", "Mean", "Median", "Min", "Max", "Std Dev"),
         Value = c(
-          nrow(rv$historical_data),
-          round(mean(rv$historical_data$value, na.rm = TRUE), 2),
-          round(median(rv$historical_data$value, na.rm = TRUE), 2),
-          round(min(rv$historical_data$value, na.rm = TRUE), 2),
-          round(max(rv$historical_data$value, na.rm = TRUE), 2),
-          round(sd(rv$historical_data$value, na.rm = TRUE), 2)
-        )
+          nrow(historical_data_converted()),
+          round(mean(historical_data_converted()$value, na.rm = TRUE), 2),
+          round(median(historical_data_converted()$value, na.rm = TRUE), 2),
+          round(min(historical_data_converted()$value, na.rm = TRUE), 2),
+          round(max(historical_data_converted()$value, na.rm = TRUE), 2),
+          round(sd(historical_data_converted()$value, na.rm = TRUE), 2)
+        ),
+        Units = c("", unit_label, unit_label, unit_label, unit_label, unit_label)
       )
     }
   })
   
-  # Historical data table
   output$hist_table <- renderDT({
-    req(rv$historical_data)
+    req(historical_data_converted(), rv$historical_datastream_name)
     
-    if (nrow(rv$historical_data) > 0) {
-      rv$historical_data %>%
-        mutate(timestamp = format(timestamp, "%Y-%m-%d %H:%M")) %>%
+    if (nrow(historical_data_converted()) > 0) {
+      unit_label <- get_unit_label(rv$historical_datastream_name, use_imperial())
+      
+      historical_data_converted() %>%
+        mutate(timestamp = format(timestamp, "%Y-%m-%d %H:%M"),
+               value = round(value, 2)) %>%
+        rename(Timestamp = timestamp, 
+               !!paste0("Value (", unit_label, ")") := value) %>%
         datatable(options = list(pageLength = 10),
                   rownames = FALSE)
     }
   })
   
-  # Download current conditions
   output$download_current <- downloadHandler(
     filename = function() {
+      unit_sys <- if(use_imperial()) "imperial" else "metric"
       paste0("current_conditions_", 
              rv$selected_station$slug, "_",
+             unit_sys, "_",
              format(Sys.time(), "%Y%m%d_%H%M%S"),
              ".csv")
     },
     content = function(file) {
-      write.csv(rv$current_data, file, row.names = FALSE)
+      export_data <- current_data_converted() %>%
+        mutate(
+          unit_system = if(use_imperial()) "Imperial" else "Metric",
+          timestamp_local = format(timestamp_utc, "%Y-%m-%d %H:%M UTC")
+        ) %>%
+        select(Datastream = datastream, 
+               Value = value, 
+               Units = units,
+               Unit_System = unit_system,
+               Timestamp_UTC = timestamp_local)
+      
+      write.csv(export_data, file, row.names = FALSE)
     }
   )
   
-  # Download historical data
   output$download_historical <- downloadHandler(
     filename = function() {
+      unit_sys <- if(use_imperial()) "imperial" else "metric"
       paste0("historical_data_", 
              rv$selected_station$slug, "_",
+             unit_sys, "_",
              format(Sys.time(), "%Y%m%d_%H%M%S"),
              ".csv")
     },
@@ -714,7 +1229,6 @@ server <- function(input, output, session) {
         for (i in seq_along(input$export_datastreams)) {
           ds_id <- input$export_datastreams[i]
           
-          # Find datastream name
           ds_match <- rv$current_data %>% filter(datastream_id == ds_id)
           ds_name <- if(nrow(ds_match) > 0) ds_match$datastream[1] else ds_id
           
@@ -724,7 +1238,15 @@ server <- function(input, output, session) {
           hist_data <- get_historical_data(ds_id, as.numeric(input$export_days))
           
           if (nrow(hist_data) > 0) {
-            hist_data$datastream <- ds_name
+            hist_data <- hist_data %>%
+              mutate(
+                value = convert_value(value_metric, ds_name, use_imperial()),
+                datastream = ds_name,
+                units = get_unit_label(ds_name, use_imperial()),
+                unit_system = if(use_imperial()) "Imperial" else "Metric"
+              ) %>%
+              select(timestamp, datastream, value, units, unit_system)
+            
             all_data[[i]] <- hist_data
           }
         }
